@@ -1,82 +1,82 @@
 (function () {
     'use strict';
 
-    // Манифест плагина для Lampa
-    Lampa.Plugins.add({
-        id: 'cub_sort_rating',
-        name: 'Сортировка по рейтингу',
-        version: '1.1.0',
-        description: 'Добавляет сортировку карточек по рейтингу в коллекциях и списках CUB',
-        author: 'Lampa Developer'
-    });
-
-    function initSort() {
-        // Перехват отрисовки списков/коллекций
+    function initSortPlugin() {
+        // Перехватываем отрисовку списков/коллекций в Lampa
         Lampa.Listener.follow('full', function (e) {
-            if (e.type === 'complite') {
-                addSortButton(e.target);
+            if (e.type === 'build') {
+                // Безопасное добавление функционала сортировки
+                setTimeout(function () {
+                    try {
+                        addSortControl();
+                    } catch (err) {
+                        console.log('Sort Plugin Error:', err);
+                    }
+                }, 500);
             }
         });
     }
 
-    function addSortButton(activity) {
-        try {
-            // Проверяем, что мы находимся в разделе коллекций или похожем списке
-            let render = activity.render();
-            if (!render) return;
+    function addSortControl() {
+        // Ищем панель управления или меню на странице коллекции
+        var head = $('.view--head .view__actions');
+        if (!head.length) return;
 
-            let head = render.find('.view--head');
-            if (head.length && !head.find('.sort-by-rating-btn').length) {
-                let btn = $(`<div class="selector view--sort-btn sort-by-rating-btn" style="padding: 0 15px; display: flex; align-items: center; cursor: pointer; margin-left: 10px; background: rgba(255,255,255,0.1); border-radius: 8px;">
-                    <span>По рейтингу</span>
-                </div>`);
+        // Проверяем, чтобы кнопка не дублировалась
+        if (head.find('.lamp-sort-rating-btn').length) return;
 
-                btn.on('hover:enter', function () {
-                    sortCollectionItems(activity);
-                });
+        var sortButton = $(
+            '<div class="selector view__action lamp-sort-rating-btn">' +
+                '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+                    '<path d="M3 9l4-4 4 4M7 5v14M21 15l-4 4-4-4M17 19V5"/>' +
+                '</svg>' +
+                '<span>Сортировать по рейтингу</span>' +
+            '</div>'
+        );
 
-                head.append(btn);
-            }
-        } catch (err) {
-            console.error('CUB Sort:', err);
-        }
+        sortButton.on('hover:enter', function () {
+            sortCollectionCards();
+        });
+
+        head.append(sortButton);
     }
 
-    function sortCollectionItems(activity) {
-        if (!activity || typeof activity.activity !== 'function') return;
-        
-        // Получаем текущие элементы карточек в активности
-        let items = activity.getItems ? activity.getItems() : null;
+    function sortCollectionCards() {
+        // Получаем текущий активный компонент карточек
+        var activeComponent = Lampa.Activity.active();
+        if (!activeComponent || !activeComponent.activity) return;
+
+        // Находим массив элементов на странице
+        var items = activeComponent.card_items || activeComponent.items;
         if (!items || !items.length) {
-            Lampa.Noty.show('Нет элементов для сортировки');
+            Lampa.Noty.show('Элементы для сортировки не найдены');
             return;
         }
 
-        // Сортируем элементы по убыванию рейтинга (vote_average или vote)
+        // Сортируем элементы по рейтингу (vote_average / rating) от большего к меньшему
         items.sort(function (a, b) {
-            let rateA = parseFloat(a.vote_average || a.rating || a.vote || 0);
-            let rateB = parseFloat(b.vote_average || b.rating || b.vote || 0);
-            return rateB - rateA;
+            var ratingA = parseFloat(a.vote_average || a.rating || 0);
+            var ratingB = parseFloat(b.vote_average || b.rating || 0);
+            return ratingB - ratingA;
         });
 
-        // Перестраиваем отображение списка в Lampa
-        if (typeof activity.draw === 'function') {
-            activity.draw(items);
-        } else if (typeof activity.append === 'function') {
-            // Альтернативный метод обновления контейнера
-            activity.reset();
-            activity.append(items);
+        // Перерисовываем сетку карточек
+        if (typeof activeComponent.refresh === 'function') {
+            activeComponent.refresh();
+        } else if (typeof activeComponent.build === 'function') {
+            activeComponent.build();
         }
 
         Lampa.Noty.show('Коллекция отсортирована по рейтингу');
     }
 
+    // Инициализация плагина при готовности Lampa
     if (window.appready) {
-        initSort();
+        initSortPlugin();
     } else {
         Lampa.Listener.follow('app', function (e) {
             if (e.type === 'ready') {
-                initSort();
+                initSortPlugin();
             }
         });
     }
