@@ -1,116 +1,438 @@
-/**
- * @plugin Сортировка по рейтингу
- * @version 1.3.0
- * @description Добавляет кнопку «По рейтингу» для сортировки карточек в коллекциях и списках CUB
- * @author Lampa Developer
- */
-
 (function () {
     'use strict';
 
-    if (window.cub_sort_rating_plugin_loaded) return;
-    window.cub_sort_rating_plugin_loaded = true;
+    /*
+     * CUB Collections — сортировка фильмов по рейтингу
+     * Версия: 1.0.0
+     */
 
-    function initSortPlugin() {
-        // Перехватываем отрисовку компонентов и коллекций в Lampa
-        Lampa.Listener.follow('full', function (e) {
-            if (e.type === 'complite' || e.type === 'build') {
-                setTimeout(function () {
-                    addSortButton(e.target);
-                }, 300);
-            }
-        });
+    if (window.CUBCollectionRatingSort) return;
+    window.CUBCollectionRatingSort = true;
 
-        Lampa.Listener.follow('activity', function (e) {
-            if (e.type === 'start') {
-                setTimeout(function () {
-                    if (e.component && (e.component === 'cub_collection' || e.component === 'favorite' || e.component === 'category')) {
-                        addSortButton(e.object);
-                    }
-                }, 400);
-            }
-        });
+    var VERSION = '1.0.0';
+    var STORAGE_KEY = 'cub_collection_rating_sort';
+    var network = null;
+
+    function getStorage() {
+        return Lampa.Storage.get(STORAGE_KEY, '{}');
     }
 
-    function addSortButton(target) {
-        try {
-            if (!target || typeof target.render !== 'function') return;
-            var render = target.render();
-            if (!render || !render.length) return;
+    function setStorage(data) {
+        Lampa.Storage.set(STORAGE_KEY, data);
+    }
 
-            // Ищем шапку страницы коллекции
-            var head = render.find('.view--head .view__actions, .box__head, .full-start__buttons, .view--actions').first();
-            if (!head.length) {
-                head = render.find('.view--head');
-            }
-            if (!head.length) return;
+    function getMode(collectionId) {
+        var data = getStorage();
 
-            // Защита от дублирования кнопки
-            if (head.find('.lamp-sort-rating-btn').length) return;
+        if (!data || typeof data !== 'object') data = {};
 
-            var sortButton = $(
-                '<div class="selector view__action lamp-sort-rating-btn" style="display:inline-flex;align-items:center;cursor:pointer;margin-left:10px;padding: 0 15px;background: rgba(255,255,255,0.1);border-radius: 8px;height: 44px;">' +
-                    '<span style="font-size: 14px;">По рейтингу</span>' +
-                '</div>'
-            );
+        return data[collectionId] || 'rating_desc';
+    }
 
-            // Обработка нажатия пульта / клика
-            sortButton.on('hover:enter', function () {
-                sortCollectionCards(target);
-            });
+    function setMode(collectionId, mode) {
+        var data = getStorage();
 
-            head.append(sortButton);
-        } catch (err) {
-            console.log('CUB Sort Error adding button:', err);
+        if (!data || typeof data !== 'object') data = {};
+
+        data[collectionId] = mode;
+        setStorage(data);
+    }
+
+    function getRating(item) {
+        if (!item) return -1;
+
+        var values = [
+            item.vote_average,
+            item.rating,
+            item.tmdb_rating,
+            item.tmdb_vote_average
+        ];
+
+        for (var i = 0; i < values.length; i++) {
+            var value = parseFloat(values[i]);
+
+            if (isFinite(value)) return value;
         }
+
+        return -1;
     }
 
-    function sortCollectionCards(target) {
-        try {
-            var items = target.card_items || target.items || (target.activity && target.activity.items) || target.results;
+    function getItems(data) {
+        if (!data) return [];
 
-            if (!items || !Array.isArray(items) || items.length === 0) {
-                if (target.storage && target.storage.movie) {
-                    items = target.storage.movie;
+        if (Array.isArray(data.results)) return data.results;
+        if (Array.isArray(data.items)) return data.items;
+        if (Array.isArray(data.movies)) return data.movies;
+        if (Array.isArray(data.data)) return data.data;
+
+        return [];
+    }
+
+    function getTotalPages(data) {
+        var pages = parseInt(data && data.total_pages, 10);
+
+        // Как и в оригинальном плагине CUB
+        if (!isFinite(pages) || pages < 1) pages = 15;
+
+        return Math.min(pages, 100);
+    }
+
+    function getCollectionId(object) {
+        if (!object) return '';
+
+        return String(
+            object.url ||
+            object.collection ||
+            object.id ||
+            ''
+        );
+    }
+
+    function getCollectionTitle(object) {
+        return object && object.title
+            ? object.title
+            : 'Коллекция CUB';
+    }
+
+    function cubDomain() {
+        if (Lampa.Manifest && Lampa.Manifest.cub_domain) {
+            return Lampa.Manifest.cub_domain;
+        }
+
+        return 'cub.red';
+    }
+
+    function apiUrl(collectionId, page) {
+        return Lampa.Utils.protocol() +
+            cubDomain() +
+            '/api/collections/view/' +
+            encodeURIComponent(collectionId) +
+            '?page=' +
+            page;
+    }
+
+    function getHeaders() {
+        var user = Lampa.Storage.get('account', '{}');
+
+        if (!user || !user.token) return {};
+
+        return {
+            headers: {
+                token: user.token,
+                profile: user.id
+            }
+        };
+    }
+
+    function requestPage(collectionId, page, onSuccess, onError) {
+        network.silent(
+            apiUrl(collectionId, page),
+            onSuccess,
+            onError,
+            false,
+            getHeaders()
+        );
+    }
+
+    /*
+     * Загружаем всю коллекцию.
+     * Иначе фильм с рейтингом 9.0 на второй странице
+     * нельзя будет поставить выше фильма 7.0 с первой.
+     */
+    function loadAll(collectionId, done, failed) {
+        var all = [];
+        var firstPage = null;
+
+        function loadPage(page) {
+            requestPage(collectionId, page, function (data) {
+                if (!firstPage) firstPage = data;
+
+                all = all.concat(getItems(data));
+
+                var totalPages = getTotalPages(firstPage);
+
+                if (page >= totalPages) {
+                    done(firstPage, all);
+                    return;
                 }
+
+                loadPage(page + 1);
+            }, function () {
+                // Если первая страница не загрузилась — ошибка.
+                // Если последующая — используем уже загруженные фильмы.
+                if (firstPage && all.length) done(firstPage, all);
+                else failed();
+            });
+        }
+
+        loadPage(1);
+    }
+
+    function sortByRating(items, direction) {
+        return items
+            .map(function (item, index) {
+                return {
+                    item: item,
+                    index: index,
+                    rating: getRating(item)
+                };
+            })
+            .sort(function (a, b) {
+
+                // Фильмы без рейтинга всегда в конце
+                if (a.rating < 0 && b.rating >= 0) return 1;
+                if (a.rating >= 0 && b.rating < 0) return -1;
+
+                if (a.rating !== b.rating) {
+                    return direction === 'asc'
+                        ? a.rating - b.rating
+                        : b.rating - a.rating;
+                }
+
+                // При одинаковом рейтинге сохраняем порядок CUB
+                return a.index - b.index;
+            })
+            .map(function (entry) {
+                return entry.item;
+            });
+    }
+
+    function showSortMenu(collectionId, title) {
+        var current = getMode(collectionId);
+
+        Lampa.Select.show({
+            title: 'Сортировка коллекции',
+            items: [
+                {
+                    title: '⭐ По рейтингу — сначала лучшие',
+                    mode: 'rating_desc'
+                },
+                {
+                    title: 'По рейтингу — сначала худшие',
+                    mode: 'rating_asc'
+                },
+                {
+                    title: 'Исходный порядок CUB',
+                    mode: 'original'
+                }
+            ],
+            onSelect: function (item) {
+                if (!item || !item.mode) return;
+
+                setMode(collectionId, item.mode);
+
+                Lampa.Activity.replace({
+                    url: collectionId,
+                    title: title,
+                    component: 'cub_collections_view',
+                    page: 1
+                });
+            },
+            onBack: function () {
+                Lampa.Controller.toggle('content');
+            }
+        });
+    }
+
+    function installCardHooks(comp, collectionId, title) {
+        var tries = 0;
+
+        function scan() {
+            tries++;
+
+            var render = comp.render && comp.render();
+
+            if (render && render.find) {
+                render.find('.card.selector').each(function () {
+                    var card = this;
+
+                    if (card.__cubRatingSortAttached) return;
+
+                    card.__cubRatingSortAttached = true;
+
+                    $(card).on(
+                        'hover:long.cub_rating_sort',
+                        function (event) {
+                            if (event && event.stopPropagation) {
+                                event.stopPropagation();
+                            }
+
+                            showSortMenu(collectionId, title);
+                        }
+                    );
+                });
             }
 
-            if (!items || !Array.isArray(items) || items.length === 0) {
-                Lampa.Noty.show('Элементы для сортировки не найдены');
-                return;
+            // Карточки могут появляться после build()
+            if (tries < 20) {
+                setTimeout(scan, 150);
             }
+        }
 
-            // Сортировка элементов по убыванию рейтинга (vote_average / rating)
-            items.sort(function (a, b) {
-                var ratingA = parseFloat(a.vote_average || a.rating || a.vote || 0);
-                var ratingB = parseFloat(b.vote_average || b.rating || b.vote || 0);
-                return ratingB - ratingA;
+        scan();
+    }
+
+    /*
+     * Заменяем компонент просмотра содержимого CUB-коллекции.
+     */
+    function makeComponent(object) {
+        var comp = new Lampa.InteractionCategory(object);
+        var collectionId = getCollectionId(object);
+        var collectionTitle = getCollectionTitle(object);
+
+        comp.create = function () {
+            var self = this;
+
+            this.activity.loader(true);
+
+            loadAll(collectionId, function (firstPage, allItems) {
+                var mode = getMode(collectionId);
+                var result = allItems.slice();
+
+                var ratedCount = allItems.filter(function (item) {
+                    return getRating(item) >= 0;
+                }).length;
+
+                if (mode === 'rating_desc') {
+                    result = sortByRating(result, 'desc');
+                }
+                else if (mode === 'rating_asc') {
+                    result = sortByRating(result, 'asc');
+                }
+
+                if (
+                    mode !== 'original' &&
+                    allItems.length &&
+                    ratedCount === 0
+                ) {
+                    console.warn(
+                        '[CUB Rating Sort] Рейтинг не найден',
+                        allItems[0]
+                    );
+
+                    setTimeout(function () {
+                        Lampa.Noty.show(
+                            'CUB не передал рейтинг фильмов — сортировка невозможна'
+                        );
+                    }, 300);
+                }
+
+                /*
+                 * Берём ответ первой страницы и заменяем results
+                 * на весь объединённый и отсортированный список.
+                 */
+                var data = {};
+
+                for (var key in firstPage) {
+                    if (
+                        Object.prototype.hasOwnProperty.call(
+                            firstPage,
+                            key
+                        )
+                    ) {
+                        data[key] = firstPage[key];
+                    }
+                }
+
+                data.results = result;
+
+                // Все фильмы уже загружены
+                data.total_pages = 1;
+                data.page = 1;
+
+                self.build(data);
+
+                installCardHooks(
+                    self,
+                    collectionId,
+                    collectionTitle
+                );
+
+                self.activity.loader(false);
+
+            }, function () {
+                self.activity.loader(false);
+                self.empty();
             });
 
-            // Обновление представления (перерисовка сетки карточек)
-            if (typeof target.refresh === 'function') {
-                target.refresh();
-            } else if (typeof target.build === 'function') {
-                target.build();
-            } else if (typeof target.draw === 'function') {
-                target.draw(items);
-            } else if (target.activity && typeof target.activity.refresh === 'function') {
-                target.activity.refresh();
-            }
+            return this.render();
+        };
 
-            Lampa.Noty.show('Коллекция отсортирована по рейтингу');
-        } catch (err) {
-            console.log('CUB Sort Error sorting:', err);
-            Lampa.Noty.show('Ошибка сортировки');
+        /*
+         * Новые страницы больше не нужны:
+         * мы загрузили всю коллекцию сразу.
+         */
+        comp.nextPageReuest = function (object, resolve) {
+            resolve({
+                results: [],
+                total_pages: 1,
+                page: 1
+            });
+        };
+
+        return comp;
+    }
+
+    function startPlugin() {
+        network = new Lampa.Reguest();
+
+        /*
+         * Оригинальный CUB уже создал cub_collections_view.
+         * Регистрируем свою версию после него.
+         */
+        Lampa.Component.add(
+            'cub_collections_view',
+            makeComponent
+        );
+
+        console.log(
+            '[CUB Rating Sort] v' + VERSION + ' loaded'
+        );
+
+        Lampa.Noty.show(
+            'CUB: сортировка доступна долгим нажатием на фильм'
+        );
+    }
+
+    /*
+     * Ждём загрузки Lampa и оригинального CUB Collections.
+     */
+    var attempts = 0;
+
+    function waitForCUB() {
+        attempts++;
+
+        if (
+            window.Lampa &&
+            Lampa.Component &&
+            Lampa.InteractionCategory &&
+            Lampa.Reguest &&
+            Lampa.Storage &&
+            Lampa.Activity &&
+            Lampa.Manifest &&
+            Lampa.Manifest.cub_domain
+        ) {
+            startPlugin();
+            return;
+        }
+
+        if (attempts < 100) {
+            setTimeout(waitForCUB, 250);
+        }
+        else {
+            console.warn(
+                '[CUB Rating Sort] CUB Collections не найден'
+            );
         }
     }
 
     if (window.appready) {
-        initSortPlugin();
-    } else {
-        Lampa.Listener.follow('app', function (e) {
-            if (e.type === 'ready') {
-                initSortPlugin();
+        waitForCUB();
+    }
+    else {
+        Lampa.Listener.follow('app', function (event) {
+            if (event.type === 'ready') {
+                waitForCUB();
             }
         });
     }
