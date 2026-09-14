@@ -886,23 +886,15 @@
                         item.__cubRatingSortItem;
                 });
 
-                if (!alreadyExists) {
-                    /*
-                     * НЕ ставим separator:true!
-                     *
-                     * separator делает пункт разделителем,
-                     * поэтому он отображается, но не выбирается.
-                     */
-                    items.push({
-                        title: '🔀 Сортировка коллекции',
-                        __cubRatingSortItem: true,
-                        onSelect: function () {
-                            showSortMenu(
-                                currentCollectionContext
-                            );
-                        }
-                    });
-                }
+if (!alreadyExists) {
+    items.push({
+        title: '🔀 Сортировка коллекции',
+        __cubRatingSortItem: true,
+        onSelect: function () {
+            showSortMenu(currentCollectionContext);
+        }
+    });
+}
 
                 var originalOnSelect = params.onSelect;
                 var context = currentCollectionContext;
