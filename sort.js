@@ -891,7 +891,8 @@ if (!alreadyExists) {
         title: '🔀 Сортировка коллекции',
         __cubRatingSortItem: true,
         onSelect: function () {
-            showSortMenu(currentCollectionContext);
+var activePage = Lampa.Activity.active();
+            showSortMenu(activePage);
         }
     });
 }
