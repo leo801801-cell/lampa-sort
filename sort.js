@@ -27,7 +27,7 @@
 
     var VERSION = '1.1.0';
     var STORAGE_KEY = 'cub_collection_rating_sort';
-    var network = new Lampa.Reguest();
+    var network = null;
 
     function getStorage() {
         return Lampa.Storage.get(STORAGE_KEY, '{}');
@@ -696,4 +696,312 @@
                         title: title,
                         component: 'cub_collections_view',
                         page: 1,
-                        cub_rating_sort_reload: Date.no
+                        cub_rating_sort_reload: Date.now()
+                    });
+
+                    if (enabled) Lampa.Controller.toggle(enabled);
+                }
+            );
+        });
+    }
+
+    function buildCollectionData(
+        comp,
+        firstPage,
+        result,
+        mode,
+        collectionId,
+        collectionTitle
+    ) {
+        /*
+         * Передаём InteractionCategory обычный объект ответа CUB.
+         * Все фильмы уже находятся в одном массиве, поэтому
+         * последующая пагинация не нужна.
+         */
+        var data = {};
+
+        for (var key in firstPage) {
+            if (Object.prototype.hasOwnProperty.call(firstPage, key)) {
+                data[key] = firstPage[key];
+            }
+        }
+
+        data.results = result;
+        data.total_pages = 1;
+        data.page = 1;
+        data.cub_rating_sorted = mode !== 'original';
+        data.cub_rating_sort_mode = mode;
+
+        comp.build(data);
+
+        installCardHooks(
+            comp,
+            collectionId,
+            collectionTitle
+        );
+    }
+
+    function makeComponent(object) {
+        var comp = new Lampa.InteractionCategory(object);
+        var collectionId = getCollectionId(object);
+        var collectionTitle = getCollectionTitle(object);
+        var originalBuild = comp.build;
+
+        comp.create = function () {
+            var self = this;
+
+            this.activity.loader(true);
+
+            loadAll(
+                collectionId,
+                function (firstPage, allItems) {
+                    var mode = getMode(collectionId);
+                    var result = allItems.slice();
+
+                    if (mode === 'rating_desc') {
+                        result = sortByRating(result, 'desc');
+                    } else if (mode === 'rating_asc') {
+                        result = sortByRating(result, 'asc');
+                    }
+
+                    /*
+                     * Для КП сначала добираем отсутствующие рейтинги.
+                     * Результаты складываются в тот же кэш kp_rating,
+                     * который использует rating.js.
+                     */
+                    if (
+                        mode === 'kp_desc' ||
+                        mode === 'kp_asc'
+                    ) {
+                        self.activity.loader(true);
+
+                        loadKpRatings(
+                            allItems,
+                            function () {
+                                result = sortByKpRating(
+                                    allItems,
+                                    mode === 'kp_asc'
+                                        ? 'asc'
+                                        : 'desc'
+                                );
+
+                                buildCollectionData(
+                                    self,
+                                    firstPage,
+                                    result,
+                                    mode,
+                                    collectionId,
+                                    collectionTitle
+                                );
+
+                                self.activity.loader(false);
+                            }
+                        );
+
+                        return;
+                    }
+
+                    buildCollectionData(
+                        self,
+                        firstPage,
+                        result,
+                        mode,
+                        collectionId,
+                        collectionTitle
+                    );
+
+                    self.activity.loader(false);
+                },
+                function () {
+                    self.activity.loader(false);
+                    self.empty();
+                }
+            );
+
+            return this.render();
+        };
+
+        /*
+         * Если Lampa попытается запросить следующую страницу,
+         * ничего больше не загружаем: все страницы уже объединены.
+         */
+        comp.nextPageReuest = function (
+            object,
+            resolve,
+            reject
+        ) {
+            resolve({
+                results: [],
+                total_pages: 1,
+                page: 1
+            });
+        };
+
+        return comp;
+    }
+
+    function installCardHooks(
+        comp,
+        collectionId,
+        title
+    ) {
+        var tries = 0;
+
+        function scan() {
+            tries++;
+
+            var render = comp.render && comp.render();
+
+            if (render && render.find) {
+                /*
+                 * Карточки стандартной категории.
+                 * selector исключает служебные элементы.
+                 */
+                render.find('.card.selector').each(function () {
+                    var card = this;
+
+                    if (card.__cubRatingSortAttached) return;
+
+                    card.__cubRatingSortAttached = true;
+
+                    var jq = $(card);
+
+                    if (!jq.attr('data-cub-rating-sort')) {
+                        jq.attr(
+                            'data-cub-rating-sort',
+                            '1'
+                        );
+                    }
+
+                    jq.on(
+                        'hover:long.cub_rating_sort',
+                        function (event) {
+                            if (
+                                event &&
+                                event.stopPropagation
+                            ) {
+                                event.stopPropagation();
+                            }
+
+                            showSortMenu(
+                                collectionId,
+                                title,
+                                function () {
+                                    Lampa.Activity.replace({
+                                        url: collectionId,
+                                        title: title,
+                                        component: 'cub_collections_view',
+                                        page: 1,
+                                        cub_rating_sort_reload: Date.now()
+                                    });
+                                }
+                            );
+                        }
+                    );
+                });
+            }
+
+            /*
+             * Новые карточки после рендера могут появиться не сразу.
+             */
+            if (tries < 20) {
+                setTimeout(scan, 150);
+            }
+        }
+
+        scan();
+    }
+
+    function startPlugin() {
+        network = new Lampa.Reguest();
+
+        /*
+         * CUB Collections уже регистрирует этот component.
+         * Мы регистрируем свою версию после него, поэтому переход
+         * из оригинального CUB остаётся тем же:
+         *
+         * component: 'cub_collections_view'
+         */
+        Lampa.Component.add(
+            'cub_collections_view',
+            makeComponent
+        );
+
+        /*
+         * Показываем уведомление один раз после загрузки.
+         */
+        if (
+            !Lampa.Storage.get(
+                'cub_rating_sort_notice',
+                false
+            )
+        ) {
+            Lampa.Storage.set(
+                'cub_rating_sort_notice',
+                true
+            );
+
+            setTimeout(function () {
+                Lampa.Noty.show(
+                    'CUB: сортировка по TMDB и Кинопоиску доступна через долгое нажатие на фильм'
+                );
+            }, 1200);
+        }
+
+        console.log(
+            '[CUB Rating Sort] v' +
+            VERSION +
+            ' loaded'
+        );
+    }
+
+    /*
+     * Ждём, пока оригинальный CUB Collections создаст
+     * Manifest.cub_domain.
+     * Это позволяет ставить наш плагин независимо
+     * от порядка загрузки.
+     */
+    var attempts = 0;
+
+    function waitForCUB() {
+        attempts++;
+
+        if (
+            window.Lampa &&
+            Lampa.Component &&
+            Lampa.InteractionCategory &&
+            Lampa.Reguest &&
+            Lampa.Storage &&
+            Lampa.Activity &&
+            Lampa.Manifest &&
+            Lampa.Manifest.cub_domain
+        ) {
+            startPlugin();
+            return;
+        }
+
+        if (attempts < 100) {
+            setTimeout(
+                waitForCUB,
+                250
+            );
+        } else {
+            console.warn(
+                '[CUB Rating Sort] CUB Collections не найден'
+            );
+        }
+    }
+
+    if (window.appready) {
+        waitForCUB();
+    } else {
+        Lampa.Listener.follow(
+            'app',
+            function (event) {
+                if (event.type === 'ready') {
+                    waitForCUB();
+                }
+            }
+        );
+    }
+})();
