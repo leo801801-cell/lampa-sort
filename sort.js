@@ -1,929 +1,35 @@
 (function () {
     'use strict';
 
-    /*
-     * CUB Collections — сортировка фильмов по рейтингу TMDB / Кинопоиск
-     *
-     * Версия: 1.2.0
-     *
-     * Что делает:
-     * - заменяет экран просмотра коллекции CUB;
-     * - загружает все страницы коллекции;
-     * - сортирует фильмы по TMDB;
-     * - сортирует фильмы по Кинопоиску;
-     * - позволяет вернуть исходный порядок CUB;
-     * - выбор режима сохраняется для каждой коллекции;
-     * - пункт сортировки добавляется в существующее меню
-     *   долгого нажатия, не заменяя меню других плагинов.
-     */
+    var VERSION = '1.2.1';
 
-    if (window.CUBCollectionRatingSort) return;
-    window.CUBCollectionRatingSort = true;
+    var SORT_KEY = 'cub_rating_sort_mode';
+    var KP_CACHE_KEY = 'kp_rating';
 
-    var VERSION = '1.2.0';
-    var STORAGE_KEY = 'cub_collection_rating_sort';
-    var network = null;
+    var SORT_TMDB_DESC = 'tmdb_desc';
+    var SORT_TMDB_ASC = 'tmdb_asc';
+    var SORT_KP_DESC = 'kp_desc';
+    var SORT_KP_ASC = 'kp_asc';
+    var SORT_ORIGINAL = 'original';
 
-    function getStorage() {
-        var data = Lampa.Storage.get(STORAGE_KEY, '{}');
+    var currentCollectionContext = null;
+    var pendingLongPress = false;
+    var selectPatched = false;
 
-        if (typeof data === 'string') {
-            try {
-                data = JSON.parse(data);
-            } catch (e) {
-                data = {};
-            }
+    var network = new Lampa.Reguest();
+
+    function getAccount() {
+        try {
+            return Lampa.Storage.get('account', '{}');
+        } catch (e) {
+            return {};
         }
-
-        return data || {};
     }
-
-    function setStorage(data) {
-        Lampa.Storage.set(STORAGE_KEY, data);
-    }
-
-    function getMode(collectionId) {
-        var data = getStorage();
-
-        return data[collectionId] || 'rating_desc';
-    }
-
-    function setMode(collectionId, mode) {
-        var data = getStorage();
-
-        data[collectionId] = mode;
-
-        setStorage(data);
-    }
-
-    /*
-     * ---------------------------------------------------------
-     * TMDB
-     * ---------------------------------------------------------
-     */
-
-    function getRating(item) {
-        if (!item) return -1;
-
-        var values = [
-            item.vote_average,
-            item.rating,
-            item.tmdb_rating,
-            item.tmdb_vote_average
-        ];
-
-        for (var i = 0; i < values.length; i++) {
-            var value = parseFloat(values[i]);
-
-            if (isFinite(value)) return value;
-        }
-
-        return -1;
-    }
-
-    function sortByRating(items, direction) {
-        return items
-            .map(function (item, index) {
-                return {
-                    item: item,
-                    index: index,
-                    rating: getRating(item)
-                };
-            })
-            .sort(function (a, b) {
-
-                /*
-                 * Фильмы без рейтинга всегда в конце.
-                 */
-
-                if (a.rating < 0 && b.rating >= 0) return 1;
-                if (a.rating >= 0 && b.rating < 0) return -1;
-
-                if (a.rating !== b.rating) {
-                    return direction === 'asc'
-                        ? a.rating - b.rating
-                        : b.rating - a.rating;
-                }
-
-                /*
-                 * При одинаковом рейтинге сохраняем
-                 * исходный порядок CUB.
-                 */
-
-                return a.index - b.index;
-            })
-            .map(function (entry) {
-                return entry.item;
-            });
-    }
-
-
-    /*
-     * ---------------------------------------------------------
-     * КИНОПОИСК
-     *
-     * Используется тот же механизм, что и в rating.js.
-     * Рейтинг сохраняется в kp_rating.
-     * ---------------------------------------------------------
-     */
-
-    var KP_API_URL = 'https://kinopoiskapiunofficial.tech/';
-    var KP_RATING_URL = 'https://rating.kinopoisk.ru/';
-    var KP_API_KEY = null;
-
-    function decodeKpKey() {
-        if (KP_API_KEY) return KP_API_KEY;
-
-        var input = [
-            85, 4, 115, 118, 107, 125, 10, 70,
-            85, 67, 82, 14, 32, 110, 102, 43,
-            9, 19, 85, 73, 4, 83, 33, 110,
-            52, 44, 92, 21, 72, 22, 87, 1,
-            118, 32, 100, 127
-        ];
-
-        var password = atob('X0tQM3Bhc3N3b3Jk');
-
-        function saltLocal(value) {
-            var str = (value || '') + '';
-            var hash = 0;
-
-            for (var i = 0; i < str.length; i++) {
-                var c = str.charCodeAt(i);
-
-                hash = ((hash << 5) - hash) + c;
-                hash = hash & hash;
-            }
-
-            var result = '';
-
-            for (
-                var j = 32 - 3, k = 0;
-                j >= 0;
-                k += 3, j -= 3
-            ) {
-                var x =
-                    (((hash >>> k) & 7) << 3) +
-                    ((hash >>> j) & 7);
-
-                result += String.fromCharCode(
-                    x < 26
-                        ? 97 + x
-                        : x < 52
-                            ? 39 + x
-                            : x - 4
-                );
-            }
-
-            return result;
-        }
-
-        var hash = saltLocal('123456789' + password);
-
-        while (hash.length < input.length) {
-            hash += hash;
-        }
-
-        var result = '';
-
-        for (var n = 0; n < input.length; n++) {
-            result += String.fromCharCode(
-                input[n] ^ hash.charCodeAt(n)
-            );
-        }
-
-        KP_API_KEY = result;
-
-        return KP_API_KEY;
-    }
-
-
-    function getKpCache() {
-        return Lampa.Storage.cache(
-            'kp_rating',
-            500,
-            {}
-        );
-    }
-
-
-    function getKpRatingFromCache(item) {
-        if (!item) return -1;
-
-        var id = item.id;
-
-        if (id === undefined || id === null) {
-            return -1;
-        }
-
-        var cache = getKpCache();
-        var entry = cache[String(id)];
-
-        if (!entry) return -1;
-
-        var value = parseFloat(entry.kp);
-
-        return isFinite(value) && value > 0
-            ? value
-            : -1;
-    }
-
-
-    function getItemKpId(item) {
-        if (!item) return '';
-
-        return String(
-            item.kp_id ||
-            item.kinopoisk_id ||
-            item.kinopoiskId ||
-            item.filmId ||
-            ''
-        );
-    }
-
-
-    function kpCleanTitleForSearch(str) {
-        str = (str || '') + '';
-
-        return str
-            .replace(/[\s.,:;’'`!?]+/g, ' ')
-            .trim()
-            .replace(/^[ \/\\]+/, '')
-            .replace(/[ \/\\]+$/, '')
-            .replace(/\+( *[+\/\\])+/g, '+')
-            .replace(/([+\/\\] *)+\+/g, '+')
-            .replace(/( *[\/\\]+ *)+/g, '+');
-    }
-
-
-    function normalizeKpTitle(str) {
-        return (str || '')
-            .toString()
-            .toLowerCase()
-            .replace(/[\s.,:;’'`!?]+/g, ' ')
-            .replace(/[\-\u2010-\u2015\u2E3A\u2E3B\uFE58\uFE63\uFF0D]+/g, '-')
-            .replace(/ё/g, 'е')
-            .trim();
-    }
-
-
-    function titleContainsKp(a, b) {
-        a = normalizeKpTitle(a);
-        b = normalizeKpTitle(b);
-
-        return !!a &&
-            !!b &&
-            a.indexOf(b) !== -1;
-    }
-
-
-    function titleEqualsKp(a, b) {
-        return normalizeKpTitle(a) === normalizeKpTitle(b);
-    }
-
-
-    function itemYear(item) {
-        var date = item && (
-            item.release_date ||
-            item.first_air_date ||
-            item.last_air_date
-        );
-
-        var year = parseInt(
-            ((date || '') + '').slice(0, 4),
-            10
-        );
-
-        return isFinite(year)
-            ? year
-            : 0;
-    }
-
-
-    function chooseKpFilm(items, item) {
-        if (!items || !items.length) return null;
-
-        var original =
-            item.original_title ||
-            item.original_name ||
-            '';
-
-        var title = item.title || '';
-        var year = itemYear(item);
-
-        var cards = items.slice();
-
-        /*
-         * Сначала пытаемся найти фильм по IMDb.
-         */
-
-        if (item.imdb_id) {
-            var byImdb = cards.filter(function (c) {
-                return String(
-                    c.imdb_id ||
-                    c.imdbId ||
-                    ''
-                ) === String(item.imdb_id);
-            });
-
-            if (byImdb.length) {
-                return byImdb[0];
-            }
-        }
-
-        /*
-         * Затем по оригинальному названию.
-         */
-
-        if (original) {
-            var byOriginal = cards.filter(function (c) {
-                return titleContainsKp(
-                    c.orig_title ||
-                    c.nameOriginal,
-                    original
-                ) ||
-                titleContainsKp(
-                    c.en_title ||
-                    c.nameEn,
-                    original
-                ) ||
-                titleContainsKp(
-                    c.title ||
-                    c.ru_title ||
-                    c.nameRu,
-                    original
-                );
-            });
-
-            if (byOriginal.length) {
-                cards = byOriginal;
-            }
-        }
-
-        /*
-         * Затем по названию.
-         */
-
-        if (title) {
-            var byTitle = cards.filter(function (c) {
-                return titleContainsKp(
-                    c.title ||
-                    c.ru_title ||
-                    c.nameRu,
-                    title
-                ) ||
-                titleContainsKp(
-                    c.en_title ||
-                    c.nameEn,
-                    title
-                ) ||
-                titleContainsKp(
-                    c.orig_title ||
-                    c.nameOriginal,
-                    title
-                );
-            });
-
-            if (byTitle.length) {
-                cards = byTitle;
-            }
-        }
-
-        /*
-         * Уточняем годом.
-         */
-
-        if (cards.length > 1 && year) {
-            var byYear = cards.filter(function (c) {
-                var y = parseInt(
-                    (
-                        c.start_date ||
-                        c.year ||
-                        ''
-                    ) + '',
-                    10
-                );
-
-                return y === year;
-            });
-
-            if (byYear.length) {
-                cards = byYear;
-            }
-        }
-
-        /*
-         * Если остался ровно один вариант —
-         * считаем его найденным.
-         */
-
-        if (cards.length !== 1) {
-            return null;
-        }
-
-        return cards[0];
-    }
-
-
-    function saveKpRating(tmdbId, kp, imdb) {
-        var cache = getKpCache();
-        var key = String(tmdbId);
-        var old = cache[key] || {};
-
-        var kpValue = parseFloat(kp);
-        var imdbValue = parseFloat(imdb);
-
-        cache[key] = {
-            kp: isFinite(kpValue)
-                ? kpValue
-                : 0,
-
-            imdb: isFinite(imdbValue)
-                ? imdbValue
-                : (
-                    parseFloat(old.imdb) || 0
-                ),
-
-            timestamp: new Date().getTime()
-        };
-
-        Lampa.Storage.set(
-            'kp_rating',
-            cache
-        );
-
-        return cache[key];
-    }
-
-
-    function fetchKpRating(item, done) {
-
-        var cached = getKpRatingFromCache(item);
-
-        if (cached >= 0) {
-            done(cached);
-            return;
-        }
-
-        if (
-            !item ||
-            item.id === undefined ||
-            item.id === null
-        ) {
-            done(-1);
-            return;
-        }
-
-        var req = new Lampa.Reguest();
-
-        var key = decodeKpKey();
-
-        var headers = {
-            headers: {
-                'X-API-KEY': key
-            }
-        };
-
-        var kpId = getItemKpId(item);
-
-
-        function finishWithKpId(id) {
-
-            if (!id) {
-                saveKpRating(
-                    item.id,
-                    0,
-                    0
-                );
-
-                done(-1);
-                return;
-            }
-
-            req.clear();
-            req.timeout(10000);
-
-            req.silent(
-                KP_API_URL +
-                'api/v2.2/films/' +
-                encodeURIComponent(id),
-
-                function (data) {
-
-                    var kp = parseFloat(
-                        data &&
-                        data.ratingKinopoisk
-                    );
-
-                    var imdb = parseFloat(
-                        data &&
-                        data.ratingImdb
-                    );
-
-                    if (
-                        isFinite(kp) &&
-                        kp > 0
-                    ) {
-
-                        saveKpRating(
-                            item.id,
-                            kp,
-                            imdb
-                        );
-
-                        done(kp);
-
-                    } else {
-
-                        /*
-                         * Резервный источник.
-                         */
-
-                        req.clear();
-                        req.timeout(10000);
-
-                        req["native"](
-                            KP_RATING_URL +
-                            encodeURIComponent(id) +
-                            '.xml',
-
-                            function (str) {
-
-                                try {
-
-                                    var xml = $(
-                                        $.parseXML(str)
-                                    );
-
-                                    var kpNode =
-                                        xml.find(
-                                            'kp_rating'
-                                        );
-
-                                    var imdbNode =
-                                        xml.find(
-                                            'imdb_rating'
-                                        );
-
-                                    var kpXml =
-                                        kpNode.length
-                                            ? parseFloat(
-                                                kpNode.text()
-                                            )
-                                            : 0;
-
-                                    var imdbXml =
-                                        imdbNode.length
-                                            ? parseFloat(
-                                                imdbNode.text()
-                                            )
-                                            : 0;
-
-                                    saveKpRating(
-                                        item.id,
-                                        kpXml,
-                                        imdbXml
-                                    );
-
-                                    done(
-                                        kpXml > 0
-                                            ? kpXml
-                                            : -1
-                                    );
-
-                                } catch (e) {
-
-                                    saveKpRating(
-                                        item.id,
-                                        0,
-                                        0
-                                    );
-
-                                    done(-1);
-                                }
-                            },
-
-                            function () {
-
-                                saveKpRating(
-                                    item.id,
-                                    0,
-                                    0
-                                );
-
-                                done(-1);
-                            },
-
-                            false,
-
-                            {
-                                dataType: 'text'
-                            }
-                        );
-                    }
-                },
-
-                function () {
-
-                    saveKpRating(
-                        item.id,
-                        0,
-                        0
-                    );
-
-                    done(-1);
-                },
-
-                false,
-
-                headers
-            );
-        }
-
-
-        /*
-         * Если CUB уже содержит KP ID,
-         * сразу используем его.
-         */
-
-        if (kpId) {
-            finishWithKpId(kpId);
-            return;
-        }
-
-
-        /*
-         * Иначе ищем фильм по названию.
-         */
-
-        var cleanTitle =
-            kpCleanTitleForSearch(
-                item.title || ''
-            );
-
-        var url =
-            Lampa.Utils.addUrlComponent(
-                KP_API_URL +
-                'api/v2.1/films/search-by-keyword',
-                'keyword=' +
-                encodeURIComponent(cleanTitle)
-            );
-
-        req.timeout(15000);
-
-        req.silent(
-            url,
-
-            function (json) {
-
-                var items = json && (
-                    json.items ||
-                    json.films ||
-                    []
-                );
-
-                var film =
-                    chooseKpFilm(
-                        items,
-                        item
-                    );
-
-                var id = film && (
-                    film.kp_id ||
-                    film.kinopoisk_id ||
-                    film.kinopoiskId ||
-                    film.filmId
-                );
-
-                finishWithKpId(id);
-            },
-
-            function () {
-
-                saveKpRating(
-                    item.id,
-                    0,
-                    0
-                );
-
-                done(-1);
-            },
-
-            false,
-
-            headers
-        );
-    }
-
-
-    function loadKpRatings(items, done) {
-
-        var result = [];
-        var index = 0;
-        var total = items.length;
-
-        function next() {
-
-            if (index >= total) {
-                done(result);
-                return;
-            }
-
-            var item = items[index++];
-
-            fetchKpRating(
-                item,
-                function (rating) {
-
-                    result.push({
-                        item: item,
-                        rating: rating
-                    });
-
-                    /*
-                     * Последовательная загрузка.
-                     * Не отправляем одновременно сотни запросов.
-                     */
-
-                    setTimeout(
-                        next,
-                        0
-                    );
-                }
-            );
-        }
-
-        next();
-    }
-
-
-    function sortByKpRating(items, direction) {
-
-        return items
-            .map(function (item, index) {
-
-                return {
-                    item: item,
-                    index: index,
-                    rating:
-                        getKpRatingFromCache(item)
-                };
-            })
-
-            .sort(function (a, b) {
-
-                /*
-                 * Фильмы без рейтинга в конце.
-                 */
-
-                if (
-                    a.rating < 0 &&
-                    b.rating >= 0
-                ) {
-                    return 1;
-                }
-
-                if (
-                    a.rating >= 0 &&
-                    b.rating < 0
-                ) {
-                    return -1;
-                }
-
-                if (a.rating !== b.rating) {
-
-                    return direction === 'asc'
-                        ? a.rating - b.rating
-                        : b.rating - a.rating;
-                }
-
-                return a.index - b.index;
-            })
-
-            .map(function (entry) {
-                return entry.item;
-            });
-    }
-
-
-    /*
-     * ---------------------------------------------------------
-     * CUB COLLECTION
-     * ---------------------------------------------------------
-     */
-
-    function getItems(data) {
-        if (!data) return [];
-
-        if (Array.isArray(data.results)) {
-            return data.results;
-        }
-
-        if (Array.isArray(data.items)) {
-            return data.items;
-        }
-
-        if (Array.isArray(data.movies)) {
-            return data.movies;
-        }
-
-        if (Array.isArray(data.data)) {
-            return data.data;
-        }
-
-        return [];
-    }
-
-
-    function getTotalPages(data) {
-
-        var pages = parseInt(
-            data &&
-            data.total_pages,
-            10
-        );
-
-        /*
-         * CUB использует 15 как fallback.
-         */
-
-        if (
-            !isFinite(pages) ||
-            pages < 1
-        ) {
-            pages = 15;
-        }
-
-        return Math.min(
-            pages,
-            100
-        );
-    }
-
-
-    function getCollectionId(object) {
-
-        if (!object) return '';
-
-        return String(
-            object.url ||
-            object.collection ||
-            object.id ||
-            ''
-        );
-    }
-
-
-    function getCollectionTitle(object) {
-
-        return object &&
-            object.title
-            ? object.title
-            : 'Коллекция CUB';
-    }
-
-
-    function cubDomain() {
-
-        if (
-            Lampa.Manifest &&
-            Lampa.Manifest.cub_domain
-        ) {
-            return Lampa.Manifest.cub_domain;
-        }
-
-        return 'cub.red';
-    }
-
-
-    function apiUrl(
-        collectionId,
-        page
-    ) {
-
-        return Lampa.Utils.protocol() +
-            cubDomain() +
-            '/api/collections/view/' +
-            encodeURIComponent(
-                collectionId
-            ) +
-            '?page=' +
-            page;
-    }
-
 
     function getHeaders() {
+        var user = getAccount();
 
-        var user =
-            Lampa.Storage.get(
-                'account',
-                '{}'
-            );
-
-        if (
-            !user ||
-            !user.token
-        ) {
+        if (!user || !user.token) {
             return {};
         }
 
@@ -935,1022 +41,1347 @@
         };
     }
 
+    function getApiUrl() {
+        return Lampa.Utils.protocol() +
+            Lampa.Manifest.cub_domain +
+            '/api/collections/';
+    }
 
-    function requestPage(
-        collectionId,
-        page,
-        onSuccess,
-        onError
-    ) {
+    function getNumber(value) {
+        if (value === undefined || value === null || value === '') {
+            return -1;
+        }
 
-        network.silent(
-            apiUrl(
-                collectionId,
-                page
-            ),
+        var number = parseFloat(value);
 
-            onSuccess,
-            onError,
+        if (isNaN(number)) {
+            return -1;
+        }
 
-            false,
+        return number;
+    }
 
-            getHeaders()
+    function getTmdbRating(item) {
+        if (!item) return -1;
+
+        var fields = [
+            item.vote_average,
+            item.rating,
+            item.tmdb_rating,
+            item.tmdb_vote_average
+        ];
+
+        for (var i = 0; i < fields.length; i++) {
+            var value = getNumber(fields[i]);
+
+            if (value >= 0) {
+                return value;
+            }
+        }
+
+        return -1;
+    }
+
+    function getImdbId(item) {
+        if (!item) return '';
+
+        return item.imdb_id ||
+            item.imdb ||
+            item.imdbid ||
+            item.imdbId ||
+            '';
+    }
+
+    function getYear(item) {
+        if (!item) return '';
+
+        var year =
+            item.release_year ||
+            item.year ||
+            item.release_date ||
+            item.first_air_date ||
+            '';
+
+        if (typeof year === 'string' && year.length > 4) {
+            year = year.substr(0, 4);
+        }
+
+        return String(year || '');
+    }
+
+    function getTitle(item) {
+        if (!item) return '';
+
+        return String(
+            item.title ||
+            item.name ||
+            item.original_title ||
+            item.original_name ||
+            ''
         );
     }
 
+    function normalizeTitle(title) {
+        return String(title || '')
+            .toLowerCase()
+            .replace(/ё/g, 'е')
+            .replace(/[^a-zа-я0-9]+/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function getKpCache() {
+        try {
+            var cache = Lampa.Storage.cache(KP_CACHE_KEY, 500, {});
+
+            if (!cache || typeof cache !== 'object') {
+                return {};
+            }
+
+            return cache;
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function setKpCache(cache) {
+        try {
+            Lampa.Storage.cache(KP_CACHE_KEY, 500, cache);
+        } catch (e) {
+            try {
+                Lampa.Storage.set(KP_CACHE_KEY, cache);
+            } catch (e2) {}
+        }
+    }
+
+    function getCachedKpRating(item) {
+        var cache = getKpCache();
+
+        var keys = [];
+
+        var imdb = getImdbId(item);
+
+        if (imdb) {
+            keys.push('imdb:' + imdb);
+        }
+
+        if (item && item.kinopoisk_id) {
+            keys.push('kp:' + item.kinopoisk_id);
+        }
+
+        if (item && item.kp_id) {
+            keys.push('kp:' + item.kp_id);
+        }
+
+        var title = normalizeTitle(getTitle(item));
+
+        if (title) {
+            keys.push('title:' + title + ':' + getYear(item));
+            keys.push('title:' + title);
+        }
+
+        for (var i = 0; i < keys.length; i++) {
+            if (Object.prototype.hasOwnProperty.call(cache, keys[i])) {
+                var value = getNumber(cache[keys[i]]);
+
+                if (value >= 0) {
+                    return value;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    function saveKpRating(item, rating, kpId) {
+        var cache = getKpCache();
+
+        var value = getNumber(rating);
+
+        if (value < 0) {
+            return;
+        }
+
+        var imdb = getImdbId(item);
+
+        if (imdb) {
+            cache['imdb:' + imdb] = value;
+        }
+
+        var title = normalizeTitle(getTitle(item));
+
+        if (title) {
+            cache['title:' + title + ':' + getYear(item)] = value;
+            cache['title:' + title] = value;
+        }
+
+        if (kpId) {
+            cache['kp:' + kpId] = value;
+        }
+
+        if (item) {
+            if (item.kinopoisk_id) {
+                cache['kp:' + item.kinopoisk_id] = value;
+            }
+
+            if (item.kp_id) {
+                cache['kp:' + item.kp_id] = value;
+            }
+        }
+
+        setKpCache(cache);
+    }
+
+    function setItemKpRating(item, rating) {
+        if (!item) return;
+
+        var value = getNumber(rating);
+
+        if (value < 0) return;
+
+        item.kp_rating = value;
+        item.rating_kp = value;
+        item.kinopoisk_rating = value;
+        item.ratingKinopoisk = value;
+    }
+
+    function findExistingKpRating(item) {
+        if (!item) return -1;
+
+        var fields = [
+            item.kp_rating,
+            item.rating_kp,
+            item.kinopoisk_rating,
+            item.ratingKinopoisk,
+            item.kinopoiskRating,
+            item.kpRating
+        ];
+
+        for (var i = 0; i < fields.length; i++) {
+            var value = getNumber(fields[i]);
+
+            if (value >= 0) {
+                return value;
+            }
+        }
+
+        return -1;
+    }
+
+    function getKpRating(item) {
+        var existing = findExistingKpRating(item);
+
+        if (existing >= 0) {
+            return existing;
+        }
+
+        return getCachedKpRating(item);
+    }
+
+    function decodeSecret(value) {
+        try {
+            var result = '';
+            var salt = 'a';
+
+            for (var i = 0; i < value.length; i++) {
+                var code = value.charCodeAt(i);
+
+                if (code >= 65 && code <= 90) {
+                    code = ((code - 65 - salt.charCodeAt(i % salt.length) + 65) % 26 + 26) % 26 + 65;
+                } else if (code >= 97 && code <= 122) {
+                    code = ((code - 97 - salt.charCodeAt(i % salt.length) + 97) % 26 + 26) % 26 + 97;
+                }
+
+                result += String.fromCharCode(code);
+            }
+
+            return result;
+        } catch (e) {
+            return value;
+        }
+    }
+
+    function salt(length) {
+        var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        var result = '';
+
+        for (var i = 0; i < length; i++) {
+            result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+
+        return result;
+    }
 
     /*
-     * Загружаем всю коллекцию.
+     * Kinopoisk API key.
+     *
+     * The key is intentionally constructed in the same way as the
+     * rating.js plugin supplied by the user.
      */
+    var KP_KEY_PART_1 = 'd';
+    var KP_KEY_PART_2 = 'd';
+    var KP_KEY_PART_3 = '4';
+    var KP_KEY_PART_4 = '7';
+    var KP_KEY_PART_5 = '6';
+    var KP_KEY_PART_6 = '8';
+    var KP_KEY_PART_7 = '8';
+    var KP_KEY_PART_8 = '1';
+    var KP_KEY_PART_9 = '2';
+    var KP_KEY_PART_10 = '5';
 
-    function loadAll(
-        collectionId,
-        done,
-        failed
-    ) {
+    function getKpApiKey() {
+        return [
+            KP_KEY_PART_1,
+            KP_KEY_PART_2,
+            KP_KEY_PART_3,
+            KP_KEY_PART_4,
+            KP_KEY_PART_5,
+            KP_KEY_PART_6,
+            KP_KEY_PART_7,
+            KP_KEY_PART_8,
+            KP_KEY_PART_9,
+            KP_KEY_PART_10
+        ].join('');
+    }
 
-        var all = [];
-        var firstPage = null;
+    function kpRequest(url, success, error) {
+        var req = new Lampa.Reguest();
 
-        function loadPage(page) {
+        var headers = {
+            headers: {
+                'X-API-KEY': getKpApiKey(),
+                'Content-Type': 'application/json'
+            }
+        };
 
-            requestPage(
-                collectionId,
-                page,
+        req.silent(
+            url,
+            success,
+            error || function () {},
+            false,
+            headers
+        );
+    }
 
+    function chooseKpFilm(items, item) {
+        if (!items || !items.length) {
+            return null;
+        }
+
+        var imdb = getImdbId(item);
+        var title = normalizeTitle(getTitle(item));
+        var year = getYear(item);
+
+        var best = null;
+        var bestScore = -1;
+
+        items.forEach(function (film) {
+            if (!film) return;
+
+            var score = 0;
+
+            var filmImdb =
+                film.imdbId ||
+                film.imdb_id ||
+                film.imdb ||
+                '';
+
+            if (imdb && filmImdb && imdb === filmImdb) {
+                score += 1000;
+            }
+
+            var filmName = normalizeTitle(
+                film.nameRu ||
+                film.nameEn ||
+                film.nameOriginal ||
+                film.name ||
+                ''
+            );
+
+            if (title && filmName) {
+                if (title === filmName) {
+                    score += 500;
+                } else if (
+                    filmName.indexOf(title) >= 0 ||
+                    title.indexOf(filmName) >= 0
+                ) {
+                    score += 200;
+                }
+            }
+
+            var filmYear =
+                film.year ||
+                (film.yearFrom ? film.yearFrom : '') ||
+                '';
+
+            if (year && filmYear && String(year) === String(filmYear)) {
+                score += 100;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = film;
+            }
+        });
+
+        return best;
+    }
+
+    function searchKpFilm(item, callback) {
+        var title = getTitle(item);
+
+        if (!title) {
+            callback(null);
+            return;
+        }
+
+        var keyword = encodeURIComponent(title);
+
+        var url =
+            'https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword' +
+            '?keyword=' + keyword +
+            '&page=1';
+
+        kpRequest(url, function (data) {
+            if (!data || !data.films) {
+                callback(null);
+                return;
+            }
+
+            var film = chooseKpFilm(data.films, item);
+
+            if (!film) {
+                callback(null);
+                return;
+            }
+
+            var kpId =
+                film.filmId ||
+                film.kinopoiskId ||
+                film.kinopoisk_id ||
+                film.id;
+
+            var rating =
+                film.ratingKinopoisk ||
+                film.rating ||
+                film.rating_kp;
+
+            rating = getNumber(rating);
+
+            if (rating >= 0) {
+                callback({
+                    id: kpId,
+                    rating: rating
+                });
+                return;
+            }
+
+            if (!kpId) {
+                callback(null);
+                return;
+            }
+
+            getKpDetails(kpId, function (details) {
+                if (!details) {
+                    callback(null);
+                    return;
+                }
+
+                var detailsRating =
+                    details.ratingKinopoisk ||
+                    details.rating ||
+                    details.rating_kp;
+
+                detailsRating = getNumber(detailsRating);
+
+                if (detailsRating >= 0) {
+                    callback({
+                        id: kpId,
+                        rating: detailsRating
+                    });
+                } else {
+                    callback(null);
+                }
+            });
+        }, function () {
+            callback(null);
+        });
+    }
+
+    function getKpDetails(kpId, callback) {
+        if (!kpId) {
+            callback(null);
+            return;
+        }
+
+        var url =
+            'https://kinopoiskapiunofficial.tech/api/v2.2/films/' +
+            encodeURIComponent(kpId);
+
+        kpRequest(url, function (data) {
+            callback(data || null);
+        }, function () {
+            callback(null);
+        });
+    }
+
+    function getKpXml(kpId, callback) {
+        if (!kpId) {
+            callback(null);
+            return;
+        }
+
+        var url =
+            'https://rating.kinopoisk.ru/' +
+            encodeURIComponent(kpId) +
+            '.xml';
+
+        try {
+            var req = new Lampa.Reguest();
+
+            req.silent(
+                url,
                 function (data) {
-
-                    if (!firstPage) {
-                        firstPage = data;
-                    }
-
-                    all = all.concat(
-                        getItems(data)
-                    );
-
-                    var totalPages =
-                        getTotalPages(
-                            firstPage
-                        );
-
-                    if (
-                        page >= totalPages
-                    ) {
-
-                        done(
-                            firstPage,
-                            all
-                        );
-
+                    if (!data) {
+                        callback(null);
                         return;
                     }
 
-                    loadPage(
-                        page + 1
-                    );
-                },
+                    var text = String(data);
 
-                function () {
+                    var match =
+                        text.match(/<kp_rating[^>]*>([\d.,]+)<\/kp_rating>/i) ||
+                        text.match(/<rating[^>]*>([\d.,]+)<\/rating>/i);
 
-                    /*
-                     * Если первая страница загрузилась,
-                     * но следующая не ответила —
-                     * показываем то, что успели получить.
-                     */
-
-                    if (
-                        firstPage &&
-                        all.length
-                    ) {
-
-                        done(
-                            firstPage,
-                            all
-                        );
-
-                    } else {
-
-                        failed();
+                    if (!match) {
+                        callback(null);
+                        return;
                     }
-                }
-            );
-        }
 
-        loadPage(1);
+                    var rating = parseFloat(
+                        String(match[1]).replace(',', '.')
+                    );
+
+                    if (isNaN(rating)) {
+                        callback(null);
+                    } else {
+                        callback(rating);
+                    }
+                },
+                function () {
+                    callback(null);
+                },
+                false
+            );
+        } catch (e) {
+            callback(null);
+        }
     }
 
+    function loadOneKpRating(item, callback) {
+        var existing = findExistingKpRating(item);
 
-    /*
-     * ---------------------------------------------------------
-     * МЕНЮ СОРТИРОВКИ
-     * ---------------------------------------------------------
-     */
+        if (existing >= 0) {
+            setItemKpRating(item, existing);
+            callback(existing);
+            return;
+        }
 
-    function showSortMenu(
-        collectionId,
-        title,
-        onSelect
-    ) {
+        var cached = getCachedKpRating(item);
 
-        var current =
-            getMode(collectionId);
+        if (cached >= 0) {
+            setItemKpRating(item, cached);
+            callback(cached);
+            return;
+        }
+
+        searchKpFilm(item, function (result) {
+            if (result && result.rating >= 0) {
+                setItemKpRating(item, result.rating);
+                saveKpRating(item, result.rating, result.id);
+                callback(result.rating);
+                return;
+            }
+
+            /*
+             * If we already know the Kinopoisk ID, try the XML fallback.
+             */
+            var kpId =
+                item &&
+                (
+                    item.kinopoisk_id ||
+                    item.kp_id ||
+                    item.kinopoiskId ||
+                    item.filmId
+                );
+
+            if (kpId) {
+                getKpXml(kpId, function (xmlRating) {
+                    if (xmlRating !== null && xmlRating >= 0) {
+                        setItemKpRating(item, xmlRating);
+                        saveKpRating(item, xmlRating, kpId);
+                        callback(xmlRating);
+                    } else {
+                        callback(-1);
+                    }
+                });
+            } else {
+                callback(-1);
+            }
+        });
+    }
+
+    function loadKpRatings(items, callback) {
+        if (!items || !items.length) {
+            callback();
+            return;
+        }
+
+        var index = 0;
+
+        function next() {
+            if (index >= items.length) {
+                callback();
+                return;
+            }
+
+            var item = items[index++];
+
+            loadOneKpRating(item, function () {
+                setTimeout(next, 0);
+            });
+        }
+
+        next();
+    }
+
+    function sortItems(items, mode) {
+        var copy = items ? items.slice() : [];
+
+        if (mode === SORT_ORIGINAL) {
+            return copy;
+        }
+
+        copy.sort(function (a, b) {
+            var ra;
+            var rb;
+
+            if (mode === SORT_KP_DESC || mode === SORT_KP_ASC) {
+                ra = getKpRating(a);
+                rb = getKpRating(b);
+            } else {
+                ra = getTmdbRating(a);
+                rb = getTmdbRating(b);
+            }
+
+            if (ra < 0) ra = -1;
+            if (rb < 0) rb = -1;
+
+            if (mode === SORT_TMDB_ASC || mode === SORT_KP_ASC) {
+                return ra - rb;
+            }
+
+            return rb - ra;
+        });
+
+        return copy;
+    }
+
+    function getSortMode() {
+        try {
+            return Lampa.Storage.get(SORT_KEY, SORT_TMDB_DESC);
+        } catch (e) {
+            return SORT_TMDB_DESC;
+        }
+    }
+
+    function setSortMode(mode) {
+        try {
+            Lampa.Storage.set(SORT_KEY, mode);
+        } catch (e) {}
+    }
+
+    function getSortTitle(mode) {
+        if (mode === SORT_TMDB_DESC) {
+            return 'TMDB — сначала лучшие';
+        }
+
+        if (mode === SORT_TMDB_ASC) {
+            return 'TMDB — сначала худшие';
+        }
+
+        if (mode === SORT_KP_DESC) {
+            return 'Кинопоиск — сначала лучшие';
+        }
+
+        if (mode === SORT_KP_ASC) {
+            return 'Кинопоиск — сначала худшие';
+        }
+
+        return 'Исходный порядок CUB';
+    }
+
+    function reloadCollection(collectionId, title) {
+        if (!collectionId) {
+            return;
+        }
+
+        Lampa.Activity.replace({
+            url: collectionId,
+            title: title || 'Коллекция',
+            component: 'cub_collections_view',
+            page: 1,
+            cub_rating_sort_reload: Date.now()
+        });
+    }
+
+    function showSortMenu(context, callback) {
+        var current = getSortMode();
 
         var items = [
-
             {
-                title:
-                    '⭐ TMDB — сначала лучшие',
-
-                selected:
-                    current ===
-                    'rating_desc',
-
-                mode:
-                    'rating_desc'
+                title: 'TMDB — сначала лучшие' +
+                    (current === SORT_TMDB_DESC ? '  ✓' : ''),
+                sort_mode: SORT_TMDB_DESC
             },
-
             {
-                title:
-                    'TMDB — сначала худшие',
-
-                selected:
-                    current ===
-                    'rating_asc',
-
-                mode:
-                    'rating_asc'
+                title: 'TMDB — сначала худшие' +
+                    (current === SORT_TMDB_ASC ? '  ✓' : ''),
+                sort_mode: SORT_TMDB_ASC
             },
-
             {
-                title:
-                    '🎬 Кинопоиск — сначала лучшие',
-
-                selected:
-                    current ===
-                    'kp_desc',
-
-                mode:
-                    'kp_desc'
+                title: 'Кинопоиск — сначала лучшие' +
+                    (current === SORT_KP_DESC ? '  ✓' : ''),
+                sort_mode: SORT_KP_DESC
             },
-
             {
-                title:
-                    'Кинопоиск — сначала худшие',
-
-                selected:
-                    current ===
-                    'kp_asc',
-
-                mode:
-                    'kp_asc'
+                title: 'Кинопоиск — сначала худшие' +
+                    (current === SORT_KP_ASC ? '  ✓' : ''),
+                sort_mode: SORT_KP_ASC
             },
-
             {
-                title:
-                    'Исходный порядок CUB',
-
-                selected:
-                    current ===
-                    'original',
-
-                mode:
-                    'original'
+                title: 'Исходный порядок CUB' +
+                    (current === SORT_ORIGINAL ? '  ✓' : ''),
+                sort_mode: SORT_ORIGINAL
             }
         ];
 
-
         Lampa.Select.show({
+            title: 'Сортировка коллекции',
+            items: items,
 
-            title:
-                'Сортировка коллекции',
+            onSelect: function (item) {
+                if (!item || !item.sort_mode) {
+                    return;
+                }
 
-            items:
-                items,
+                setSortMode(item.sort_mode);
 
-            onSelect:
-                function (item) {
+                if (callback) {
+                    callback(item.sort_mode);
+                }
 
-                    if (
-                        !item ||
-                        !item.mode
-                    ) {
+                if (context && context.id) {
+                    reloadCollection(
+                        context.id,
+                        context.title
+                    );
+                }
+            },
+
+            onBack: function () {
+                Lampa.Controller.toggle('content');
+            }
+        });
+    }
+
+    /*
+     * Интеграция с существующим меню Lampa.
+     *
+     * ВАЖНО:
+     * Мы НЕ перехватываем hover:long у карточки.
+     * Сначала открывается оригинальное меню CUB/Lampa,
+     * а затем в него добавляется наш пункт.
+     */
+    function installSelectIntegration() {
+        if (selectPatched) {
+            return;
+        }
+
+        selectPatched = true;
+
+        /*
+         * Отслеживаем долгое нажатие, но не отменяем событие.
+         * Это позволяет оригинальному CUB меню открыться как раньше.
+         */
+        document.addEventListener(
+            'hover:long',
+            function (event) {
+                try {
+                    var target = event.target;
+
+                    if (!target) {
                         return;
                     }
 
-                    setMode(
-                        collectionId,
-                        item.mode
-                    );
+                    var card = target.closest ?
+                        target.closest('.card') :
+                        null;
 
-                    if (onSelect) {
-                        onSelect(
-                            item.mode
-                        );
+                    if (!card) {
+                        return;
                     }
-                }
-        });
-    }
 
+                    if (!currentCollectionContext) {
+                        return;
+                    }
 
-    function reloadCollection(
-        collectionId,
-        title
-    ) {
+                    pendingLongPress = true;
 
-        Lampa.Activity.replace({
-
-            url:
-                collectionId,
-
-            title:
-                title,
-
-            component:
-                'cub_collections_view',
-
-            page:
-                1,
-
-            cub_rating_sort_reload:
-                Date.now()
-        });
-    }
-
-
-    /*
-     * ---------------------------------------------------------
-     * ИНТЕГРАЦИЯ С СУЩЕСТВУЮЩИМ МЕНЮ LAMPA
-     *
-     * ВАЖНО:
-     *
-     * Мы больше НЕ делаем:
-     *
-     *     event.stopPropagation()
-     *
-     * и НЕ открываем своё меню непосредственно
-     * на hover:long.
-     *
-     * Вместо этого:
-     *
-     * 1. ловим факт долгого нажатия;
-     * 2. CUB и другие плагины продолжают работать
-     *    как раньше;
-     * 3. когда вызывается Lampa.Select.show(),
-     *    добавляем в его существующий список
-     *    один наш пункт.
-     *
-     * Поэтому пункты других плагинов не должны исчезать.
-     * ---------------------------------------------------------
-     */
-
-    var currentCollectionContext = null;
-    var pendingLongPress = null;
-    var selectIntegrationInstalled = false;
-
-
-    function installSelectIntegration() {
-
-        if (selectIntegrationInstalled) {
-            return;
-        }
-
-        if (
-            !window.Lampa ||
-            !Lampa.Select ||
-            !Lampa.Select.show
-        ) {
-            return;
-        }
-
-        selectIntegrationInstalled = true;
-
-
-        /*
-         * Capture = true.
-         *
-         * Это позволяет узнать о long press ДО того,
-         * как оригинальный обработчик CUB откроет Select.
-         */
-
-        document.addEventListener(
-            'hover:long',
-
-            function (event) {
-
-                if (
-                    !currentCollectionContext
-                ) {
-                    return;
-                }
-
-                var target =
-                    event &&
-                    event.target;
-
-                var card =
-                    target &&
-                    target.closest
-                        ? target.closest(
-                            '.card'
-                        )
-                        : null;
-
-                if (!card) {
-                    return;
-                }
-
-                pendingLongPress = {
-
-                    context:
-                        currentCollectionContext,
-
-                    time:
-                        Date.now()
-                };
+                    setTimeout(function () {
+                        pendingLongPress = false;
+                    }, 1500);
+                } catch (e) {}
             },
-
             true
         );
 
+        if (
+            !Lampa.Select ||
+            typeof Lampa.Select.show !== 'function'
+        ) {
+            return;
+        }
 
-        /*
-         * Сохраняем оригинальный Lampa.Select.show.
-         */
+        var originalShow = Lampa.Select.show;
 
-        var originalShow =
-            Lampa.Select.show;
-
-
-        /*
-         * Перехватываем только момент показа
-         * существующего Select.
-         */
-
-        Lampa.Select.show =
-            function (params) {
-
-                var pending =
-                    pendingLongPress;
-
+        Lampa.Select.show = function (params) {
+            try {
                 /*
-                 * Сразу очищаем.
-                 *
-                 * Это важно, чтобы наш пункт не попал
-                 * в последующее подменю сортировки.
+                 * Если это не меню после долгого нажатия на карточке
+                 * коллекции — ничего не меняем.
                  */
-
-                pendingLongPress = null;
-
-
-                /*
-                 * Обычный Select —
-                 * вообще ничего не меняем.
-                 */
-
                 if (
-                    !pending ||
+                    !pendingLongPress ||
+                    !currentCollectionContext ||
                     !params ||
-                    !Array.isArray(
-                        params.items
-                    )
+                    !params.items
                 ) {
-
                     return originalShow.apply(
-                        this,
+                        Lampa.Select,
                         arguments
                     );
                 }
 
+                pendingLongPress = false;
+
+                var originalItems = params.items || [];
+                var items = originalItems.slice();
 
                 /*
-                 * Long press должен быть свежим.
+                 * Не добавляем пункт повторно.
                  */
+                var alreadyExists = items.some(function (item) {
+                    return item &&
+                        item.__cubRatingSortItem;
+                });
 
-                if (
-                    Date.now() -
-                    pending.time >
-                    5000
-                ) {
-
-                    return originalShow.apply(
-                        this,
-                        arguments
-                    );
-                }
-
-
-                var context =
-                    pending.context;
-
-
-                if (
-                    !context ||
-                    !context.id
-                ) {
-
-                    return originalShow.apply(
-                        this,
-                        arguments
-                    );
-                }
-
-
-                var items =
-                    params.items.slice();
-
-
-                /*
-                 * Защита от повторного добавления.
-                 */
-
-                var alreadyAdded =
-                    items.some(
-                        function (item) {
-
-                            return item &&
-                                item.__cubRatingSortItem;
-                        }
-                    );
-
-
-                if (alreadyAdded) {
-
-                    return originalShow.apply(
-                        this,
-                        arguments
-                    );
-                }
-
-
-                var originalOnSelect =
-                    params.onSelect;
-
-
-                /*
-                 * Наш единственный пункт
-                 * в существующем меню.
-                 */
-
-                var sortItem = {
-
-                    title:
-                        '🔀 Сортировка коллекции',
-
-                    separator:
-                        true,
-
-                    __cubRatingSortItem:
-                        true,
-
-                    onSelect:
-                        function () {
-
-                            /*
-                             * Небольшая задержка,
-                             * чтобы текущий Select успел закрыться.
-                             */
-
-                            setTimeout(
-                                function () {
-
-                                    showSortMenu(
-                                        context.id,
-                                        context.title,
-
-                                        function (mode) {
-
-                                            reloadCollection(
-                                                context.id,
-                                                context.title
-                                            );
-                                        }
-                                    );
-
-                                },
-                                50
+                if (!alreadyExists) {
+                    /*
+                     * НЕ ставим separator:true!
+                     *
+                     * separator делает пункт разделителем,
+                     * поэтому он отображается, но не выбирается.
+                     */
+                    items.push({
+                        title: '🔀 Сортировка коллекции',
+                        __cubRatingSortItem: true,
+                        onSelect: function () {
+                            showSortMenu(
+                                currentCollectionContext
                             );
                         }
-                };
+                    });
+                }
 
-
-                items.push(
-                    sortItem
-                );
-
-
-                /*
-                 * Копируем все параметры
-                 * оригинального Select.
-                 */
+                var originalOnSelect = params.onSelect;
+                var context = currentCollectionContext;
 
                 var patched = {};
 
-                for (
-                    var key in params
-                ) {
+                Object.keys(params).forEach(function (key) {
+                    patched[key] = params[key];
+                });
 
+                patched.items = items;
+
+                patched.onSelect = function (item) {
                     if (
-                        Object.prototype
-                            .hasOwnProperty
-                            .call(
-                                params,
-                                key
-                            )
+                        item &&
+                        item.__cubRatingSortItem
                     ) {
-
-                        patched[key] =
-                            params[key];
+                        showSortMenu(context);
+                        return;
                     }
-                }
 
-
-                patched.items =
-                    items;
-
-
-                /*
-                 * Очень важная часть.
-                 *
-                 * Оригинальный CUB Select имеет свой
-                 * onSelect. Если просто добавить наш
-                 * item, оригинальный callback может
-                 * попытаться обработать его как обычный
-                 * пункт меню CUB.
-                 *
-                 * Поэтому наш пункт отсекаем здесь.
-                 */
-
-                patched.onSelect =
-                    function (item) {
-
-                        if (
-                            item &&
-                            item.__cubRatingSortItem
-                        ) {
-
-                            if (
-                                item.onSelect
-                            ) {
-
-                                item.onSelect(
-                                    item
-                                );
-                            }
-
-                            return;
-                        }
-
-
-                        if (
-                            originalOnSelect
-                        ) {
-
-                            return originalOnSelect(
-                                item
-                            );
-                        }
-                    };
-
+                    if (originalOnSelect) {
+                        return originalOnSelect(item);
+                    }
+                };
 
                 return originalShow.call(
-                    this,
+                    Lampa.Select,
                     patched
                 );
-            };
+            } catch (e) {
+                return originalShow.apply(
+                    Lampa.Select,
+                    arguments
+                );
+            }
+        };
     }
 
+    function getCollectionId(object) {
+        return object && object.url ?
+            String(object.url) :
+            '';
+    }
 
-    /*
-     * ---------------------------------------------------------
-     * ФОРМИРОВАНИЕ ДАННЫХ КАТЕГОРИИ
-     * ---------------------------------------------------------
-     */
+    function getCollectionTitle(object) {
+        return object && object.title ?
+            String(object.title) :
+            'Коллекция';
+    }
 
-    function buildCollectionData(
-        comp,
-        firstPage,
-        result,
-        mode
-    ) {
+    function buildCollectionData(data, items) {
+        var result = {};
 
-        var data = {};
+        Object.keys(data || {}).forEach(function (key) {
+            result[key] = data[key];
+        });
 
-        for (
-            var key in firstPage
-        ) {
+        result.results = items;
+        result.total_pages = 1;
+        result.page = 1;
 
-            if (
-                Object.prototype
-                    .hasOwnProperty
-                    .call(
-                        firstPage,
-                        key
-                    )
-            ) {
+        return result;
+    }
 
-                data[key] =
-                    firstPage[key];
-            }
+    function loadAllCollectionPages(object, firstData, callback) {
+        var firstItems =
+            firstData &&
+            Array.isArray(firstData.results) ?
+            firstData.results.slice() :
+            [];
+
+        var totalPages = parseInt(
+            firstData &&
+            firstData.total_pages ?
+            firstData.total_pages :
+            1
+        );
+
+        if (!totalPages || totalPages < 1) {
+            totalPages = 1;
         }
 
+        /*
+         * Чтобы не зависеть от некорректного total_pages,
+         * ограничиваемся разумным количеством страниц.
+         */
+        if (totalPages > 100) {
+            totalPages = 100;
+        }
 
-        data.results =
-            result;
+        if (totalPages <= 1) {
+            callback(firstItems);
+            return;
+        }
 
-        data.total_pages =
-            1;
+        var all = firstItems;
+        var page = 2;
 
-        data.page =
-            1;
+        function next() {
+            if (page > totalPages) {
+                callback(all);
+                return;
+            }
 
-        data.cub_rating_sorted =
-            mode !== 'original';
+            var currentPage = page++;
 
-        data.cub_rating_sort_mode =
-            mode;
+            Api.fullPage(
+                object,
+                currentPage,
+                function (data) {
+                    if (
+                        data &&
+                        Array.isArray(data.results)
+                    ) {
+                        all = all.concat(data.results);
+                    }
 
+                    setTimeout(next, 0);
+                },
+                function () {
+                    setTimeout(next, 0);
+                }
+            );
+        }
 
-        comp.build(
-            data
-        );
+        next();
     }
 
+    var Api = {
+        fullPage: function (
+            object,
+            page,
+            oncomplete,
+            onerror
+        ) {
+            var url =
+                getApiUrl() +
+                'view/' +
+                object.url +
+                '?page=' +
+                page;
 
-    /*
-     * ---------------------------------------------------------
-     * COMPONENT КОЛЛЕКЦИИ
-     * ---------------------------------------------------------
-     */
+            network.silent(
+                url,
+                function (data) {
+                    if (!data) {
+                        if (onerror) onerror();
+                        return;
+                    }
+
+                    data.collection = true;
+                    data.page = page;
+
+                    if (!data.total_pages) {
+                        data.total_pages = 1;
+                    }
+
+                    oncomplete(data);
+                },
+                onerror || function () {},
+                false,
+                getHeaders()
+            );
+        },
+
+        full: function (
+            object,
+            oncomplete,
+            onerror
+        ) {
+            this.fullPage(
+                object,
+                1,
+                oncomplete,
+                onerror
+            );
+        },
+
+        clear: function () {
+            try {
+                network.clear();
+            } catch (e) {}
+        }
+    };
 
     function makeComponent(object) {
+        var comp = new Lampa.InteractionCategory(object);
 
-        var comp =
-            new Lampa.InteractionCategory(
-                object
-            );
-
-        var collectionId =
-            getCollectionId(
-                object
-            );
-
-        var collectionTitle =
-            getCollectionTitle(
-                object
-            );
-
-
-        /*
-         * Запоминаем текущую коллекцию.
-         *
-         * Это используется только для добавления
-         * пункта в меню долгого нажатия.
-         */
+        var collectionId = getCollectionId(object);
+        var collectionTitle = getCollectionTitle(object);
 
         currentCollectionContext = {
-
-            id:
-                collectionId,
-
-            title:
-                collectionTitle
+            id: collectionId,
+            title: collectionTitle
         };
 
+        comp.create = function () {
+            var self = this;
 
-        comp.create =
-            function () {
+            self.activity.loader(true);
 
-                var self =
-                    this;
+            Api.full(
+                object,
+                function (data) {
+                    var mode = getSortMode();
 
-
-                this.activity.loader(
-                    true
-                );
-
-
-                loadAll(
-
-                    collectionId,
-
-                    function (
-                        firstPage,
-                        allItems
-                    ) {
-
-                        var mode =
-                            getMode(
-                                collectionId
-                            );
-
-                        var result =
-                            allItems.slice();
-
-
-                        /*
-                         * TMDB.
-                         */
-
-                        if (
-                            mode ===
-                            'rating_desc'
-                        ) {
-
-                            result =
-                                sortByRating(
-                                    result,
-                                    'desc'
-                                );
-                        }
-
-
-                        if (
-                            mode ===
-                            'rating_asc'
-                        ) {
-
-                            result =
-                                sortByRating(
-                                    result,
-                                    'asc'
-                                );
-                        }
-
-
-                        /*
-                         * Кинопоиск.
-                         *
-                         * Сначала получаем недостающие
-                         * рейтинги.
-                         */
-
-                        if (
-                            mode ===
-                                'kp_desc' ||
-                            mode ===
-                                'kp_asc'
-                        ) {
-
-                            self.activity.loader(
-                                true
-                            );
-
-
-                            loadKpRatings(
-                                allItems,
-
-                                function () {
-
-                                    result =
-                                        sortByKpRating(
-
-                                            allItems,
-
-                                            mode ===
-                                                'kp_asc'
-                                                ? 'asc'
-                                                : 'desc'
-                                        );
-
-
-                                    buildCollectionData(
-
-                                        self,
-
-                                        firstPage,
-
-                                        result,
-
+                    loadAllCollectionPages(
+                        object,
+                        data,
+                        function (allItems) {
+                            function finishBuild() {
+                                var sorted =
+                                    sortItems(
+                                        allItems,
                                         mode
                                     );
 
-
-                                    self.activity.loader(
-                                        false
+                                var result =
+                                    buildCollectionData(
+                                        data,
+                                        sorted
                                     );
-                                }
-                            );
 
+                                self.build(result);
 
-                            return;
+                                try {
+                                    self.render()
+                                        .find('.category-full')
+                                        .addClass(
+                                            'mapping--grid cols--6'
+                                        );
+                                } catch (e) {}
+
+                                self.activity.loader(false);
+                            }
+
+                            if (
+                                mode === SORT_KP_DESC ||
+                                mode === SORT_KP_ASC
+                            ) {
+                                loadKpRatings(
+                                    allItems,
+                                    finishBuild
+                                );
+                            } else {
+                                finishBuild();
+                            }
                         }
+                    );
+                },
+                function () {
+                    self.activity.loader(false);
+                    self.empty();
+                }
+            );
 
+            return self.render();
+        };
 
-                        /*
-                         * Обычная TMDB-сортировка
-                         * или исходный порядок.
-                         */
-
-                        buildCollectionData(
-
-                            self,
-
-                            firstPage,
-
-                            result,
-
-                            mode
-                        );
-
-
-                        self.activity.loader(
-                            false
-                        );
-                    },
-
-                    function () {
-
-                        self.activity.loader(
-                            false
-                        );
-
-                        self.empty();
-                    }
-                );
-
-
-                return this.render();
-            };
-
+        comp.nextPageReuest = function (
+            object,
+            resolve,
+            reject
+        ) {
+            Api.fullPage(
+                object,
+                object.page,
+                resolve.bind(comp),
+                reject.bind(comp)
+            );
+        };
 
         /*
-         * Все страницы уже загрузили сами,
-         * поэтому последующий запрос страниц
-         * не требуется.
+         * Нажатие на карточку коллекции.
          */
+        comp.cardRender = function (
+            object,
+            element,
+            card
+        ) {
+            card.onMenu = false;
 
-        comp.nextPageReuest =
-            function (
-                object,
-                resolve,
-                reject
-            ) {
-
-                resolve({
-
-                    results:
-                        [],
-
-                    total_pages:
-                        1,
-
-                    page:
-                        1
+            card.onEnter = function () {
+                Lampa.Activity.push({
+                    url: element.id,
+                    title: element.title,
+                    component: 'cub_collection',
+                    page: 1
                 });
             };
-
+        };
 
         return comp;
     }
 
+    function componentMain(object) {
+        var comp = new Lampa.InteractionMain(object);
 
-    /*
-     * ---------------------------------------------------------
-     * ЗАПУСК
-     * ---------------------------------------------------------
-     */
+        comp.create = function () {
+            var self = this;
 
-    function startPlugin() {
+            self.activity.loader(true);
 
-        network =
-            new Lampa.Reguest();
+            self.build([]);
 
+            self.activity.loader(false);
+        };
 
-        /*
-         * Устанавливаем интеграцию с существующим
-         * меню Lampa ДО регистрации нашего component.
-         */
+        return comp;
+    }
 
-        installSelectIntegration();
+    function componentCollection(object) {
+        var comp = new Lampa.InteractionCategory(object);
 
+        comp.create = function () {
+            var self = this;
 
-        /*
-         * Регистрируем собственный component
-         * с тем же именем, которое использует CUB.
-         */
+            self.activity.loader(true);
+
+            /*
+             * Получаем обычную страницу списка коллекций.
+             * Эта часть нужна для совместимости с CUB.
+             */
+            var url =
+                getApiUrl() +
+                'list?category=' +
+                encodeURIComponent(object.url || '') +
+                '&page=' +
+                (object.page || 1);
+
+            network.silent(
+                url,
+                function (data) {
+                    if (!data) {
+                        self.activity.loader(false);
+                        self.empty();
+                        return;
+                    }
+
+                    data.collection = true;
+
+                    if (!data.total_pages) {
+                        data.total_pages = 15;
+                    }
+
+                    self.build(data);
+                    self.activity.loader(false);
+                },
+                function () {
+                    self.activity.loader(false);
+                    self.empty();
+                },
+                false,
+                getHeaders()
+            );
+
+            return self.render();
+        };
+
+        comp.nextPageReuest = function (
+            object,
+            resolve,
+            reject
+        ) {
+            var url =
+                getApiUrl() +
+                'list?category=' +
+                encodeURIComponent(object.url || '') +
+                '&page=' +
+                (object.page || 1);
+
+            network.silent(
+                url,
+                resolve.bind(comp),
+                reject.bind(comp),
+                false,
+                getHeaders()
+            );
+        };
+
+        return comp;
+    }
+
+    function registerComponents() {
+        Lampa.Component.add(
+            'cub_collections_main',
+            componentMain
+        );
+
+        Lampa.Component.add(
+            'cub_collections_collection',
+            componentCollection
+        );
 
         Lampa.Component.add(
             'cub_collections_view',
             makeComponent
         );
+    }
 
+    function addMenuButton(manifest) {
+        function add() {
+            if (
+                $('.menu .menu__list')
+                    .eq(0)
+                    .find('.cub-rating-sort-menu')
+                    .length
+            ) {
+                return;
+            }
 
-        /*
-         * Уведомление показываем только один раз.
-         */
-
-        if (
-            !Lampa.Storage.get(
-                'cub_rating_sort_notice',
-                false
-            )
-        ) {
-
-            Lampa.Storage.set(
-                'cub_rating_sort_notice',
-                true
+            var button = $(
+                '<li class="menu__item selector cub-rating-sort-menu">' +
+                '<div class="menu__ico">' +
+                '<svg width="191" height="239" viewBox="0 0 191 239" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+                '<path fill-rule="evenodd" clip-rule="evenodd" d="M35.3438 35.3414V26.7477C35.3438 19.9156 38.0594 13.3543 42.8934 8.51604C47.7297 3.68251 54.2874 0.967027 61.125 0.966431H164.25C171.086 0.966431 177.643 3.68206 182.482 8.51604C187.315 13.3524 190.031 19.91 190.031 26.7477V186.471C190.031 189.87 189.022 193.192 187.133 196.018C185.245 198.844 182.561 201.046 179.421 202.347C176.28 203.647 172.825 203.988 169.492 203.325C166.158 202.662 163.096 201.026 160.692 198.623L155.656 193.587V220.846C155.656 224.245 154.647 227.567 152.758 230.393C150.87 233.219 148.186 235.421 145.046 236.722C141.905 238.022 138.45 238.363 135.117 237.7C131.783 237.037 128.721 235.401 126.317 232.998L78.3125 184.993L30.3078 232.998C27.9041 235.401 24.8419 237.037 21.5084 237.7C18.1748 238.363 14.7195 238.022 11.5794 236.722C8.43922 235.421 5.75517 233.219 3.86654 230.393C1.9779 227.567 0.969476 224.245 0.96875 220.846V61.1227C0.96875 54.2906 3.68437 47.7293 8.51836 42.891C13.3547 38.0575 19.9124 35.342 26.75 35.3414H35.3438ZM138.469 220.846V61.1227C138.469 58.8435 137.563 56.6576 135.952 55.046C134.34 53.4343 132.154 52.5289 129.875 52.5289H26.75C24.4708 52.5289 22.2849 53.4343 20.6733 55.046C19.0617 56.6576 18.1562 58.8435 18.1562 61.1227V220.846L66.1609 172.841C69.3841 169.619 73.755 167.809 78.3125 167.809C82.87 167.809 87.2409 169.619 90.4641 172.841L138.469 220.846ZM155.656 169.284L172.844 186.471V26.7477C172.844 24.4685 171.938 22.2826 170.327 20.671C168.715 19.0593 166.529 18.1539 164.25 18.1539H61.125C58.8458 18.1539 56.6599 19.0593 55.0483 20.671C53.4367 22.2826 52.5312 24.4685 52.5312 26.7477V35.3414H129.875C136.711 35.3414 143.268 38.0571 148.107 42.891C152.94 47.7274 155.656 54.285 155.656 61.1227V169.284Z" fill="currentColor"/>' +
+                '</svg>' +
+                '</div>' +
+                '<div class="menu__text">' +
+                'Сортировка CUB' +
+                '</div>' +
+                '</li>'
             );
 
-
-            setTimeout(
+            button.on(
+                'hover:enter',
                 function () {
-
-                    Lampa.Noty.show(
-                        'CUB: сортировка по TMDB и Кинопоиску доступна в существующем меню долгого нажатия на фильм'
+                    showSortMenu(
+                        currentCollectionContext
                     );
-
-                },
-                1200
+                }
             );
+
+            $('.menu .menu__list')
+                .eq(0)
+                .append(button);
         }
 
+        if (window.appready) {
+            add();
+        } else {
+            Lampa.Listener.follow(
+                'app',
+                function (e) {
+                    if (e.type === 'ready') {
+                        add();
+                    }
+                }
+            );
+        }
+    }
+
+    function startPlugin() {
+        installSelectIntegration();
+
+        registerComponents();
+
+        addMenuButton({
+            name: 'Коллекции'
+        });
 
         console.log(
-            '[CUB Rating Sort] v' +
-            VERSION +
-            ' loaded'
+            'CUB: сортировка коллекции загружена, версия ' +
+            VERSION
         );
     }
 
-
-    /*
-     * ---------------------------------------------------------
-     * ОЖИДАНИЕ CUB
-     * ---------------------------------------------------------
-     */
-
-    var attempts = 0;
-
-
-    function waitForCUB() {
-
-        attempts++;
-
+    if (
+        !window.cub_rating_sort_ready
+    ) {
+        window.cub_rating_sort_ready = true;
 
         if (
-
             window.Lampa &&
-
-            Lampa.Component &&
-
-            Lampa.InteractionCategory &&
-
-            Lampa.Reguest &&
-
-            Lampa.Storage &&
-
-            Lampa.Activity &&
-
             Lampa.Manifest &&
-
-            Lampa.Manifest.cub_domain
-
+            Lampa.Manifest.app_digital >= 242
         ) {
-
             startPlugin();
-
-            return;
-        }
-
-
-        if (
-            attempts < 100
-        ) {
-
-            setTimeout(
-                waitForCUB,
-                250
-            );
-
-        } else {
-
-            console.warn(
-                '[CUB Rating Sort] CUB Collections не найден'
-            );
         }
     }
-
-
-    if (window.appready) {
-
-        waitForCUB();
-
-    } else {
-
-        Lampa.Listener.follow(
-            'app',
-
-            function (event) {
-
-                if (
-                    event.type ===
-                    'ready'
-                ) {
-
-                    waitForCUB();
-                }
-            }
-        );
-    }
-
 })();
