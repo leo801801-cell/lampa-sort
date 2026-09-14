@@ -887,16 +887,24 @@
                 });
 
 if (!alreadyExists) {
-    items.push({
-        title: '🔀 Сортировка коллекции',
-        __cubRatingSortItem: true,
-        onSelect: function () {
-var activePage = Lampa.Activity.active();
-            showSortMenu(activePage);
-        }
-    });
-}
+            items.push({
+                title: '🔀 Сортировка коллекции',
+                __cubRatingSortItem: true,
+                onSelect: function () {
+                    var active = Lampa.Activity.active();
+                    // Получаем активную коллекцию или сохраненный контекст
+                    var targetContext = (active && active.component === 'cub_collections_view') 
+                                        ? (active.activity || active) 
+                                        : currentCollectionContext;
 
+                    if (targetContext) {
+                        showSortMenu(targetContext);
+                    } else {
+                        Lampa.Noty.show('Откройте коллекцию CUB для сортировки');
+                    }
+                }
+            });
+        }
                 var originalOnSelect = params.onSelect;
                 var context = currentCollectionContext;
 
