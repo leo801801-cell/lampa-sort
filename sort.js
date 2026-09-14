@@ -27,7 +27,7 @@
 
     var VERSION = '1.1.0';
     var STORAGE_KEY = 'cub_collection_rating_sort';
-    var network = null;
+    var network = new Lampa.Reguest();
 
     function getStorage() {
         return Lampa.Storage.get(STORAGE_KEY, '{}');
@@ -696,5 +696,4 @@
                         title: title,
                         component: 'cub_collections_view',
                         page: 1,
-                        cub_rating_sort_reload: Date.now()
-           
+                        cub_rating_sort_reload: Date.no
